@@ -24,6 +24,7 @@ CLI-based-LLM-chat-script/
 ├── chat_v2.py      # Stage 2: chat loop, no memory
 ├── chat_v3.py      # Stage 3: conversation memory
 ├── chat_v4.py      # Stage 4: error handling (final version)
+├── requirements.txt  # Python dependencies
 ├── .env            # API key (NOT committed)
 ├── .gitignore
 └── README.md
@@ -56,8 +57,10 @@ On macOS/Linux, activate with `source .venv/bin/activate` instead.
 ### 3. Install dependencies
 
 ```powershell
-pip install groq python-dotenv
+pip install -r requirements.txt
 ```
+
+This installs `groq` (the API client) and `python-dotenv` (loads the `.env` file), plus their dependencies.
 
 ### 4. Add your API key
 
