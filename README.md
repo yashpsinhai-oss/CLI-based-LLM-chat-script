@@ -1,6 +1,6 @@
 # CLI-Based LLM Chat Script
 
-A command-line chatbot built in Python using **raw LLM API calls** (no LangChain or other frameworks). The project was built in seven incremental stages to understand how LLM chat actually works under the hood: stateless API calls, loops, conversation memory, error handling, system prompts, streaming, and history trimming.
+A command-line chatbot built in Python using **raw LLM API calls** (no LangChain or other frameworks). The project was built in eight incremental stages to understand how LLM chat actually works under the hood: stateless API calls, loops, conversation memory, error handling, system prompts, streaming, history trimming, and tool calling.
 
 It uses the **Groq API** (free tier) with the `openai/gpt-oss-120b` model.
 
@@ -13,6 +13,7 @@ It uses the **Groq API** (free tier) with the `openai/gpt-oss-120b` model.
 - System prompt that controls the model's behavior on every call
 - Streaming replies, printed token by token as they are generated
 - History trimming, so long chats don't grow without limit
+- Tool calling: the model can request a live exchange-rate lookup and the current date/time (`chat_v8.py`)
 - Graceful error handling for network, rate-limit, and authentication failures
 - Ignores empty input and supports `exit` / `quit` (case-insensitive)
 - API key kept out of source control via a `.env` file
@@ -29,7 +30,9 @@ CLI-based-LLM-chat-script/
 ├── chat_v4.py        # Stage 4: error handling
 ├── chat_v5.py        # Stage 5: system prompt
 ├── chat_v6.py        # Stage 6: streaming
-├── chat_v7.py        # Stage 7: history trimming (final version)
+├── chat_v7.py        # Stage 7: history trimming (streaming chat)
+├── chat_v8.py        # Stage 8: tool calling
+├── tool_helpers.py   # tool functions used by chat_v8.py
 ├── requirements.txt  # Python dependencies
 ├── .env              # API key (NOT committed)
 ├── .gitignore
@@ -81,7 +84,8 @@ No quotes and no spaces around the `=`. The `.gitignore` already excludes this f
 ### 5. Run
 
 ```powershell
-python chat_v7.py
+python chat_v7.py    # streaming chat with system prompt and history trimming
+python chat_v8.py    # chat with tool calling (exchange rates, date and time)
 ```
 
 Type `exit` or `quit` to leave the chat.
@@ -203,7 +207,29 @@ Caps how much history is resent, so long chats don't keep growing in cost and do
 
 ---
 
-## Execution Flow (Final Version)
+### Stage 8: Tool calling (`chat_v8.py`, `tool_helpers.py`)
+
+Lets the model request functions for information it cannot know on its own. Two tools are included:
+
+- `get_exchange_rate(base_currency, target_currency)` fetches a rate from the Exchange Rate API (rates update once a day)
+- `get_current_datetime()` reads the system clock, with timezone
+
+How it works:
+
+- The model never runs code. It replies with a **request** (`finish_reason == "tool_calls"`, `message.tool_calls`), the script runs the function, and the result goes back as a `tool` message whose `tool_call_id` matches the request
+- `TOOLS` describes each function (name, description, JSON Schema parameters). The descriptions are what the model uses to decide when to call a tool
+- `AVAILABLE_TOOLS` maps tool names to Python functions and acts as the **allowed list**. A name that is not in it is never executed; an error string is sent back instead
+- Arguments arrive as a JSON string, so they are parsed with `json.loads` and passed with `func(**args)`. Schema property names must match the function's parameter names
+- A failing tool does not crash the chat: the exception is caught and sent back as `"Error: ..."` so the model can explain the problem
+- `MAX_TOOL_ROUNDS` caps how many model requests one turn may make, so a confused model cannot loop forever. A `for ... else` handles the case where the cap is reached
+- A tool turn adds several messages (assistant request, tool results, final answer), so on failure the whole turn is rolled back with `del messages[turn_start:]` instead of a single `pop()`
+- The tool functions use a request timeout, `raise_for_status()`, uppercase normalisation of currency codes, and return labelled dictionaries so the model can phrase accurate answers
+
+This version does not include streaming or history trimming. Merging them is on the roadmap, because trimmed history must keep every tool message paired with its assistant request.
+
+---
+
+## Execution Flow (Streaming Chat, `chat_v7.py`)
 
 1. `load_dotenv()` loads `.env`, then the Groq client, the system message, and an empty `history` list are created once.
 2. The loop starts and `input("User: ").strip()` waits for input.
@@ -217,6 +243,17 @@ Caps how much history is resent, so long chats don't keep growing in cost and do
 
 ---
 
+## Tool-Calling Flow (`chat_v8.py`)
+
+1. The user message is appended and `turn_start` records where the turn began.
+2. Round 1: the request is sent with `tools=TOOLS`. If the model wants a tool, the reply contains `tool_calls`.
+3. The assistant message is appended, then for each requested call the name is checked against `AVAILABLE_TOOLS`, the arguments are parsed, the function runs, and a `tool` message with the matching id is appended.
+4. Round 2: the model sees the tool results. If it needs nothing more, it returns plain text and the loop `break`s.
+5. The final text is printed once and appended once as an `assistant` message.
+6. If the round cap is reached, or an API error occurs, everything added during the turn is removed so the history stays valid.
+
+---
+
 ## Testing Checklist
 
 1. **Memory:** say "my name is Yash", then ask "what is my name". The model should answer correctly.
@@ -226,6 +263,11 @@ Caps how much history is resent, so long chats don't keep growing in cost and do
 5. **System prompt:** compare the same question in `chat_v4.py` and `chat_v5.py`. The replies should differ according to your system prompt.
 6. **Streaming:** ask a long question. The text should appear gradually rather than all at once.
 7. **Trimming:** set `MAX_HISTORY_LENGTH = 4`, tell the model your name, have two or three unrelated turns, then ask for your name. The model should no longer know it.
+8. **Tool call:** in `chat_v8.py`, ask for the USD to INR rate. A `[tool]` debug line should appear, followed by the answer. Compare the number to a real source.
+9. **Two tools:** ask to convert an amount and give today's date. Both tools should be used.
+10. **No tool needed:** say "hi". No tool should be called.
+11. **Round cap:** set `MAX_TOOL_ROUNDS = 1` and ask for an exchange rate. The cap message should appear and the turn should be rolled back.
+12. **Tool failure:** temporarily break the exchange-rate URL. The model should explain the failure instead of crashing.
 
 ---
 
@@ -240,6 +282,10 @@ Caps how much history is resent, so long chats don't keep growing in cost and do
 - Context windows and why long histories must be trimmed
 - Differences between provider SDK response shapes (Groq/OpenAI use `choices[0].message.content`; Anthropic uses `content[0].text`)
 - LLMs have no live data: a model asked for something like a current exchange rate can only guess, which is the problem tool calling solves
+- Tool calling: the model requests a function, your code executes it, and the result goes back with a matching `tool_call_id`
+- Tool arguments are a JSON string; `json.loads` plus `func(**args)` runs the function
+- Guardrails in code: an allowed-tool dictionary, a cap on tool rounds, and errors returned to the model instead of crashing
+- A `finish_reason` of `tool_calls` means the model wants a tool; a normal answer means the loop can stop
 
 ---
 
@@ -250,7 +296,8 @@ Caps how much history is resent, so long chats don't keep growing in cost and do
 - [x] Streaming responses
 - [x] History trimming
 - [ ] Detect cut-off replies using `finish_reason == "length"`
-- [ ] Tool calling loop (`finish_reason == "tool_calls"`), for example a live exchange-rate lookup
+- [x] Tool calling loop with a live exchange-rate tool and a date/time tool
+- [ ] Merge streaming and history trimming into the tool-calling script
 - [ ] Extend into a RAG chatbot with embeddings and a vector database
 
 ---
@@ -260,3 +307,10 @@ Caps how much history is resent, so long chats don't keep growing in cost and do
 - Python
 - [Groq API](https://console.groq.com) (`groq` SDK)
 - `python-dotenv`
+- `requests`
+
+---
+
+## Credits
+
+Exchange rates by [Exchange Rate API](https://www.exchangerate-api.com) (open access endpoint, `open.er-api.com`, updated once a day).
